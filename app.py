@@ -1,444 +1,695 @@
 import hashlib
+import logging
 import re
+import sqlite3
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import requests
 import streamlit as st
 
-# 1. Configuration de la page
+# ==========================================
+# 1. CONFIGURATION & LOGGING
+# ==========================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("CyberShield")
+
+DB_PATH = "cybershield_data.db"
+
+# ==========================================
+# 2. COUCHE DE PERSISTANCE (SQLITE)
+# ==========================================
+
+
+def init_db() -> None:
+    """Initialise la base de données SQLite pour la télémétrie."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    event_type TEXT NOT NULL,
+                    detail TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS metrics (
+                    metric_key TEXT PRIMARY KEY,
+                    metric_value INTEGER DEFAULT 0
+                )
+            """)
+            keys = [
+                "visites_totales",
+                "tests_mdp",
+                "mdp_forts",
+                "mdp_moyens",
+                "mdp_faibles",
+                "mdp_compromis",
+                "tests_email",
+                "emails_compromis",
+            ]
+            for key in keys:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO metrics (metric_key, metric_value) VALUES (?, 0)",
+                    (key,),
+                )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(
+            f"Erreur d'initialisation de la base de données : {str(e)}"
+        )
+
+
+def increment_metric(key: str, amount: int = 1) -> None:
+    """Incrémente une valeur métrique spécifique en base de données."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE metrics SET metric_value = metric_value + ? WHERE metric_key = ?",
+                (amount, key),
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(
+            f"Erreur lors de la mise à jour de la métrique {key} : {str(e)}"
+        )
+
+
+def get_all_metrics() -> Dict[str, int]:
+    """Récupère l'ensemble des métriques enregistrées."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT metric_key, metric_value FROM metrics")
+            return dict(cursor.fetchall())
+    except sqlite3.Error as e:
+        logger.error(f"Erreur lors de la lecture des métriques : {str(e)}")
+        return {}
+
+
+def log_event(event_type: str, detail: str = "") -> None:
+    """Enregistre un événement journalisé dans la table de télémétrie."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO telemetry (event_type, detail) VALUES (?, ?)",
+                (event_type, detail),
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(
+            f"Erreur lors de l'enregistrement de l'événement : {str(e)}"
+        )
+
+
+init_db()
+
+# ==========================================
+# 3. SERVICES D'AUDIT DE SÉCURITÉ
+# ==========================================
+
+
+@dataclass
+class PasswordCriterion:
+    description: str
+    is_met: bool
+    recommendation: str
+
+
+class PasswordSecurityEvaluator:
+
+    @staticmethod
+    def evaluate(password: str) -> Tuple[str, float, List[PasswordCriterion]]:
+        criteria = [
+            PasswordCriterion(
+                "Longueur d'au moins 12 caractères",
+                len(password) >= 12,
+                "Rallongez le mot de passe : utilisez au moins 12 à 16 caractères (ou une passphrase de plusieurs mots).",
+            ),
+            PasswordCriterion(
+                "Contient des lettres majuscules (A-Z)",
+                bool(re.search(r"[A-Z]", password)),
+                "Insérez au moins une lettre majuscule à un endroit imprévisible.",
+            ),
+            PasswordCriterion(
+                "Contient des lettres minuscules (a-z)",
+                bool(re.search(r"[a-z]", password)),
+                "Incorporez des lettres minuscules.",
+            ),
+            PasswordCriterion(
+                "Contient des chiffres (0-9)",
+                bool(re.search(r"[0-9]", password)),
+                "Ajoutez un ou plusieurs chiffres au sein du mot de passe.",
+            ),
+            PasswordCriterion(
+                "Contient des symboles spéciaux (!@#$%...)",
+                bool(re.search(r'[!@#$%^&*(),.?":{}|<>]', password)),
+                "Ajoutez des caractères spéciaux (ex: @, #, !, $, %).",
+            ),
+        ]
+
+        score = sum(1 for c in criteria if c.is_met)
+        percentage = (score / len(criteria)) * 100
+
+        if score >= 5:
+            level = "Fort"
+        elif score >= 3:
+            level = "Moyen"
+        else:
+            level = "Faible"
+
+        return level, percentage, criteria
+
+    @staticmethod
+    def check_hibp_pwned(password: str) -> Optional[int]:
+        sha1_hash = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+        prefix, suffix = sha1_hash[:5], sha1_hash[5:]
+        url = f"https://api.pwnedpasswords.com/range/{prefix}"
+
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "CyberShield-Audit-Tool"},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                for line in response.text.splitlines():
+                    h, count = line.split(":")
+                    if h == suffix:
+                        return int(count)
+                return 0
+            return None
+        except requests.RequestException as e:
+            logger.error(f"Erreur API HIBP : {str(e)}")
+            return None
+
+
+class EmailBreachEvaluator:
+
+    @staticmethod
+    def check_breaches(email: str) -> Tuple[Optional[bool], List[str]]:
+        url = f"https://api.xposedornot.com/v1/check-email/{email}"
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "CyberShield-Audit-Tool"},
+                timeout=5,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if "breaches" in data and data["breaches"]:
+                    return True, data["breaches"][0]
+                return False, []
+            elif response.status_code == 404:
+                return False, []
+            return None, []
+        except requests.RequestException as e:
+            logger.error(f"Erreur API Breach Check : {str(e)}")
+            return None, []
+
+
+# ==========================================
+# 4. INTERFACE UTILISATEUR (STREAMLIT)
+# ==========================================
+
 st.set_page_config(
-    page_title="CyberShield - Audit de Sécurité",
+    page_title="CyberShield Professional Edition",
     page_icon="🛡️",
-    layout="centered",
-    initial_sidebar_state="collapsed",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# 2. Injection de styles CSS personnalisés pour un design Cyber/SaaS moderne
+# Custom CSS
 st.markdown(
     """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', sans-serif;
-    }
-    
-    /* Arrière-plan global sombre */
-    .stApp {
-        background-color: #0B0F19;
-        color: #E2E8F0;
-    }
-    
-    /* En-tête principal */
-    .header-container {
-        text-align: center;
-        padding: 20px 0 10px 0;
-    }
-    
-    .main-title {
-        background: linear-gradient(135deg, #60A5FA 0%, #A855F7 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-size: 2.4rem;
-        font-weight: 800;
-        letter-spacing: -0.5px;
-        margin-bottom: 8px;
-    }
-    
-    .sub-title {
-        color: #94A3B8;
-        font-size: 1rem;
-        margin-bottom: 25px;
-    }
-    
-    /* Cartes de contenu */
-    .cyber-card {
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        border-radius: 16px;
-        padding: 24px;
-        margin-top: 15px;
-        margin-bottom: 20px;
-        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
-    }
-    
-    /* Badges de niveau de force */
-    .badge-container {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 12px;
-    }
-    
-    .badge-strength {
-        padding: 6px 16px;
-        border-radius: 20px;
-        font-weight: 700;
-        font-size: 0.95rem;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    
-    .badge-fort {
-        background-color: rgba(16, 185, 129, 0.15);
-        color: #34D399;
-        border: 1px solid #10B981;
-    }
-    
-    .badge-moyen {
-        background-color: rgba(245, 158, 11, 0.15);
-        color: #FBBF24;
-        border: 1px solid #F59E0B;
-    }
-    
-    .badge-faible {
-        background-color: rgba(239, 68, 68, 0.15);
-        color: #F87171;
-        border: 1px solid #EF4444;
-    }
-    
-    /* Barre de progression de robustesse */
-    .progress-bg {
-        background-color: #0F172A;
-        border-radius: 10px;
-        height: 10px;
-        width: 100%;
-        overflow: hidden;
-        margin-bottom: 20px;
-        border: 1px solid #334155;
-    }
-    
-    .bar-fort {
-        background: linear-gradient(90deg, #10B981, #34D399);
-        height: 100%;
-        width: 100%;
-    }
-    
-    .bar-moyen {
-        background: linear-gradient(90deg, #F59E0B, #FBBF24);
-        height: 100%;
-        width: 60%;
-    }
-    
-    .bar-faible {
-        background: linear-gradient(90deg, #EF4444, #F87171);
-        height: 100%;
-        width: 25%;
-    }
-    
-    /* Items de critères de sécurité */
-    .criterion-item {
-        padding: 10px 14px;
-        border-radius: 10px;
-        margin-bottom: 8px;
-        font-size: 0.92rem;
-        font-weight: 500;
-        display: flex;
-        align-items: center;
-    }
-    
-    .criterion-valid {
-        background-color: rgba(16, 185, 129, 0.08);
-        color: #6EE7B7;
-        border-left: 4px solid #10B981;
-    }
-    
-    .criterion-invalid {
-        background-color: rgba(239, 68, 68, 0.08);
-        color: #FCA5A5;
-        border-left: 4px solid #EF4444;
-    }
-    
-    /* Cartes de fuites de données */
-    .breach-pill {
-        background-color: #0F172A;
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 12px 16px;
-        margin-bottom: 10px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-    
-    .breach-name {
-        color: #F1F5F9;
-        font-weight: 600;
-        font-size: 1rem;
-    }
-    
-    /* Style personnalisé pour les onglets */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        background-color: #0F172A;
-        padding: 6px;
-        border-radius: 14px;
-        border: 1px solid #1E293B;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        height: 48px;
-        border-radius: 10px;
-        color: #94A3B8;
-        font-weight: 600;
-        border: none !important;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background-color: #1E293B !important;
-        color: #60A5FA !important;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    }
-    
-    /* Champs de saisie */
-    .stTextInput>div>div>input {
-        background-color: #0F172A !important;
-        color: #F8FAFC !important;
-        border: 1px solid #334155 !important;
-        border-radius: 12px !important;
-        padding: 12px 16px !important;
-    }
-    
-    .stTextInput>div>div>input:focus {
-        border-color: #3B82F6 !important;
-        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3) !important;
-    }
-    
-    /* Boutons principaux */
-    .stButton>button {
-        width: 100%;
-        background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
-        color: white;
-        font-weight: 600;
-        border-radius: 12px;
-        padding: 12px 24px;
-        border: none;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
-    }
-    
-    .stButton>button:hover {
-        background: linear-gradient(135deg, #1D4ED8 0%, #1E40AF 100%);
-        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
-    }
-</style>
+    <style>
+        .stApp {
+            background-color: #0A0E17;
+            color: #C9D1D9;
+        }
+        
+        .title-header {
+            font-family: 'Inter', sans-serif;
+            font-size: 2.8rem;
+            font-weight: 800;
+            background: linear-gradient(90deg, #38BDF8 0%, #818CF8 50%, #C084FC 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 0.2rem;
+            letter-spacing: -0.02em;
+        }
+        
+        .subtitle-header {
+            text-align: center;
+            color: #6B7280;
+            font-size: 1.1rem;
+            font-weight: 400;
+            margin-bottom: 1.5rem;
+        }
+
+        .welcome-card {
+            background: linear-gradient(135deg, #161B22 0%, #1F2937 100%);
+            border: 1px solid #30363D;
+            border-left: 5px solid #818CF8;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        .welcome-title {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #F3F4F6;
+            margin-bottom: 8px;
+        }
+
+        .welcome-text {
+            color: #9CA3AF;
+            font-size: 0.95rem;
+            margin-bottom: 0;
+        }
+        
+        /* Expansion des onglets sur toute la largeur */
+        div[data-baseweb="tab-list"] {
+            width: 100% !important;
+            display: flex !important;
+            justify-content: space-between !important;
+        }
+
+        div[data-baseweb="tab"] {
+            flex: 1 !important;
+            text-align: center !important;
+            justify-content: center !important;
+        }
+        
+        .recom-box {
+            background-color: #161B22;
+            border: 1px solid #30363D;
+            border-left: 4px solid #38BDF8;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 15px;
+        }
+        
+        .metric-card {
+            background: #161B22;
+            border: 1px solid #30363D;
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #58A6FF;
+        }
+        
+        .metric-label {
+            font-size: 0.85rem;
+            color: #8B949E;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+
+        .news-card {
+            background: #161B22;
+            border: 1px solid #30363D;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 12px;
+        }
+
+        .news-title {
+            font-weight: 700;
+            color: #F87171;
+            font-size: 0.9rem;
+        }
+
+        .news-details {
+            font-size: 0.8rem;
+            color: #9CA3AF;
+            margin-top: 4px;
+        }
+    </style>
 """,
-    unsafe_allow_dict=True,
+    unsafe_allow_html=True,
 )
 
-# 3. Header principal
+if "session_active" not in st.session_state:
+    st.session_state["session_active"] = True
+    increment_metric("visites_totales")
+    user_agent = st.context.headers.get("User-Agent", "Unknown")
+    log_event("VISIT", f"User-Agent: {user_agent}")
+
+st.markdown(
+    '<div class="title-header">🛡️ CYBERSHIELD SECURITY AUDITOR</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="subtitle-header">Plateforme d\'évaluation des vulnérabilités et télémétrie anonymisée</div>',
+    unsafe_allow_html=True,
+)
+
+# Message d'accueil incitatif
 st.markdown(
     """
-<div class="header-container">
-    <div class="main-title">🛡️ CyberShield Verification</div>
-    <div class="sub-title">Audit instantané de la robustesse des mots de passe et vérification d'exposition de vos e-mails</div>
-</div>
+    <div class="welcome-card">
+        <div class="welcome-title">👋 Bienvenue sur votre centre de contrôle de sécurité</div>
+        <p class="welcome-text">
+            Sélectionnez un onglet ci-dessous pour démarrer : 
+            <b>🔑 Valider la robustesse d'un mot de passe</b>, 
+            <b>📧 Vérifier si votre e-mail a été compromis</b> ou 
+            <b>📊 Consulter les statistiques d'attaques en temps réel</b>.
+        </p>
+    </div>
 """,
-    unsafe_allow_dict=True,
+    unsafe_allow_html=True,
 )
 
-# Onglets principaux
-tab1, tab2 = st.tabs(
-    ["🔑 Robustesse & Fuites de Mot de Passe", "📧 Audit d'E-mail"]
-)
+with st.sidebar:
+    st.header("⚙️ Configuration & À propos")
+    st.info(
+        "Ce système d'audit utilise le principe de k-anonymat via l'API HaveIBeenPwned. "
+        "Vos mots de passe ne transitent **jamais** en clair sur le réseau."
+    )
+    st.markdown("---")
 
-# ==========================================
-# FONCTIONS LOGIQUES
-# ==========================================
+    st.header("📢 Actualités : Derniers Piratages")
 
+    st.markdown(
+        """
+        <div class="news-card">
+            <div class="news-title">🔴 France Travail (Ex-Pôle Emploi)</div>
+            <div class="news-details">
+                <b>Données dérobées :</b> Noms, numéros de Sécurité Sociale, identifiants et e-mails de 43 millions d'usagers.<br>
+                <i>Cause :</i> Usurpation d'identifiants de conseillers.
+            </div>
+        </div>
+        
+        <div class="news-card">
+            <div class="news-title">🔴 Free / Iliad</div>
+            <div class="news-details">
+                <b>Données dérobées :</b> Données personnelles et IBAN de plus de 19 millions d'abonnés.<br>
+                <i>Cause :</i> Accès non autorisé sur un outil de gestion interne.
+            </div>
+        </div>
 
-def evaluer_mot_de_passe(mypass):
-    """Évalue les criteres et calcule la force du mot de passe."""
-    criteria = [
-        (
-            len(mypass) >= 12,
-            "Longueur minimale de 12 caractères",
-            "Augmentez la longueur à au moins 12 caractères",
-        ),
-        (
-            bool(re.search(r"[A-Z]", mypass)),
-            "Présence de lettres majuscules (A-Z)",
-            "Ajoutez au moins une majuscule",
-        ),
-        (
-            bool(re.search(r"[a-z]", mypass)),
-            "Présence de lettres minuscules (a-z)",
-            "Ajoutez au moins une minuscule",
-        ),
-        (
-            bool(re.search(r"[0-9]", mypass)),
-            "Présence de chiffres (0-9)",
-            "Ajoutez au moins un chiffre",
-        ),
-        (
-            bool(re.search(r'[!@#$%^&*(),.?":{}|<>]', mypass)),
-            "Présence de symboles spéciaux (@, #, $, !...)",
-            "Ajoutez un caractère spécial",
-        ),
+        <div class="news-card">
+            <div class="news-title">🔴 Ticketmaster</div>
+            <div class="news-details">
+                <b>Données dérobées :</b> Noms, e-mails, téléphones et 4 derniers chiffres de cartes bancaires pour 560 millions de clients.<br>
+                <i>Cause :</i> Attaque ciblant un environnement d'hébergement Snowflake.
+            </div>
+        </div>
+
+        <div class="news-card">
+            <div class="news-title">🔴 Viamedis & Almerys</div>
+            <div class="news-details">
+                <b>Données dérobées :</b> Informations de tiers payant de 33 millions de Français.<br>
+                <i>Cause :</i> Phishing ciblant des professionnels de santé.
+            </div>
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+    st.caption("CyberShield v2.6 Pro - 2026")
+
+tab_mdp, tab_email, tab_stats = st.tabs(
+    [
+        "🔑 Audit Mot de Passe",
+        "📧 Analyse de Fuite E-mail",
+        "📊 Télémétrie & Métriques",
     ]
-
-    valides = [c for c in criteria if c[0]]
-    score = len(valides)
-
-    if score >= 5:
-        force, class_style, bar_style = "Fort", "badge-fort", "bar-fort"
-    elif score >= 3:
-        force, class_style, bar_style = "Moyen", "badge-moyen", "bar-moyen"
-    else:
-        force, class_style, bar_style = "Faible", "badge-faible", "bar-faible"
-
-    return force, class_style, bar_style, criteria
-
-
-def verifier_fuite_mot_de_passe(mypass):
-    """Interroge l'API HIBP via k-Anonymity (SHA-1 prefix)."""
-    sha1_hash = hashlib.sha1(mypass.encode("utf-8")).hexdigest().upper()
-    prefix = sha1_hash[:5]
-    suffix = sha1_hash[5:]
-
-    url = f"https://api.pwnedpasswords.com/range/{prefix}"
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            hashes = (line.split(":") for line in response.text.splitlines())
-            for h, count in hashes:
-                if h == suffix:
-                    return int(count)
-            return 0
-        return None
-    except Exception:
-        return None
-
-
-def verifier_fuite_email(email):
-    """Vérifie l'exposition d'un e-mail via l'API XposedOrNot."""
-    url = f"https://api.xposedornot.com/v1/check-email/{email}"
-    try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if "breaches" in data and data["breaches"]:
-                return True, data["breaches"][0]
-            return False, []
-        return False, []
-    except Exception:
-        return None, []
-
+)
 
 # ==========================================
 # ONGLET 1 : MOT DE PASSE
 # ==========================================
-with tab1:
-    password = st.text_input(
-        "Entrez un mot de passe à tester :",
+with tab_mdp:
+    st.subheader("Analyse de la robustesse des identifiants")
+
+    pwd_input = st.text_input(
+        "Saisissez le mot de passe à évaluer :",
         type="password",
-        placeholder="Tapez votre mot de passe...",
+        key="pwd_checker",
     )
 
-    if password:
-        force, badge_class, bar_class, criteria = evaluer_mot_de_passe(
-            password
+    if pwd_input:
+        level, score_pct, criteria = PasswordSecurityEvaluator.evaluate(
+            pwd_input
         )
+        pwned_count = PasswordSecurityEvaluator.check_hibp_pwned(pwd_input)
 
-        # Affichage du score et de la jauge
-        st.markdown(
-            f"""
-        <div class="cyber-card">
-            <div class="badge-container">
-                <span style="font-weight: 600; color: #94A3B8;">Niveau de sécurité :</span>
-                <span class="badge-strength {badge_class}">{force}</span>
-            </div>
-            <div class="progress-bg">
-                <div class="{bar_class}"></div>
-            </div>
-        </div>
-        """,
-            unsafe_allow_dict=True,
-        )
+        increment_metric("tests_mdp")
+        if level == "Fort":
+            increment_metric("mdp_forts")
+        elif level == "Moyen":
+            increment_metric("mdp_moyens")
+        else:
+            increment_metric("mdp_faibles")
 
-        col1, col2 = st.columns(2)
+        if pwned_count and pwned_count > 0:
+            increment_metric("mdp_compromis")
 
-        with col1:
-            st.markdown("#### 📋 Critères d'évaluation")
-            for valid, text, rec in criteria:
-                icon = "✔" if valid else "✖"
-                css_class = "criterion-valid" if valid else "criterion-invalid"
-                st.markdown(
-                    f'<div class="criterion-item {css_class}">{icon} {text}</div>',
-                    unsafe_allow_dict=True,
+        log_event("PASSWORD_TEST", f"Level: {level}")
+
+        st.markdown("#### Diagnostic")
+        st.progress(score_pct / 100)
+
+        if level == "Fort":
+            st.success(f"Niveau de sécurité : **{level}** ({score_pct:.0f}%)")
+        elif level == "Moyen":
+            st.warning(f"Niveau de sécurité : **{level}** ({score_pct:.0f}%)")
+        else:
+            st.error(f"Niveau de sécurité : **{level}** ({score_pct:.0f}%)")
+
+        col_crit, col_fuite = st.columns(2)
+
+        with col_crit:
+            st.markdown("#### Détail des critères d'évaluation")
+            for crit in criteria:
+                if crit.is_met:
+                    st.markdown(f"✅ **{crit.description}**")
+                else:
+                    st.markdown(f"❌ **{crit.description}**")
+
+        with col_fuite:
+            st.markdown("#### Vérification dans les fuites publiques")
+            if pwned_count is None:
+                st.info("⚠️ Impossible de vérifier la présence (Erreur API).")
+            elif pwned_count > 0:
+                st.error(
+                    f"🚨 **DANGER :** Présent **{pwned_count:,} fois** dans des fuites de données !"
                 )
-
-        with col2:
-            st.markdown("#### 💡 Recommandations")
-            recs = [rec for valid, text, rec in criteria if not valid]
-            if recs:
-                for r in recs:
-                    st.markdown(f"• {r}")
             else:
-                st.success("Excellente combinaison ! Votre mot de passe suit les meilleures pratiques de sécurité.")
+                st.success("✅ Aucune fuite détectée pour ce mot de passe.")
 
         st.markdown("---")
+        st.markdown("### 🛠️ Recommandations pour améliorer votre sécurité")
 
-        # Vérification des fuites de mots de passe
-        st.markdown("#### 🔍 Recherche dans les bases de fuites publiques")
-        with st.spinner("Analyse anonymisée via l'API HIBP..."):
-            nb_fuites = verifier_fuite_mot_de_passe(password)
+        missing_criteria = [c for c in criteria if not c.is_met]
 
-        if nb_fuites is not None:
-            if nb_fuites > 0:
-                st.error(
-                    f"⚠️ **Compromission détectée !** Ce mot de passe a été trouvé **{nb_fuites:,} fois** dans des bases de données piratées. Il ne doit **absolument plus être utilisé**."
-                )
-                st.caption(
-                    "ℹ️ *Votre mot de passe est préservé : seuls les 5 premiers caractères de son empreinte SHA-1 sont transmis pour effectuer cette vérification anonyme.*"
-                )
-            else:
-                st.success(
-                    "✅ Ce mot de passe n'apparaît dans aucune fuite de données répertoriée."
-                )
+        if missing_criteria:
+            st.markdown("#### Action(s) requise(s) sur la structure :")
+            for crit in missing_criteria:
+                st.warning(f"👉 **{crit.description}** : {crit.recommendation}")
+        else:
+            st.success(
+                "🎉 La structure de votre mot de passe valide l'ensemble des critères de complexité."
+            )
+
+        if pwned_count and pwned_count > 0:
+            st.error(
+                "🚨 **Recommandation critique :** Ce mot de passe est répertorié dans des bases piratées. "
+                "Ne l'utilisez sous aucun prétexte ! Si vous l'utilisez actuellement sur un compte, modifiez-le immédiatement."
+            )
+
+        with st.expander("📌 Conseils généraux pour un mot de passe robuste"):
+            st.markdown(
+                """
+            1. **Utilisez une passphrase** : Assemblez 4 ou 5 mots aléatoires sans lien logique (ex: `Cafetière#Bleu$Trompette98!`).
+            2. **Adoptez un gestionnaire de mots de passe** : Des outils comme *Bitwarden* ou *KeePass* permettent de générer et stocker des mots de passe uniques et complexes pour chaque compte.
+            3. **Ne réutilisez jamais un mot de passe** : Un mot de passe unique par service garantit qu'une fuite sur un site ne compromet pas vos autres comptes.
+            4. **Activez l'Authentification à Double Facteur (2FA)** : Associez toujours votre mot de passe à une application d'authentification (Google Authenticator, Authy, etc.).
+            """
+            )
 
 # ==========================================
 # ONGLET 2 : AUDIT E-MAIL
 # ==========================================
-with tab2:
-    st.markdown("### Vérifier la confidentialité d'une adresse e-mail")
-    email_input = st.text_input(
-        "Adresse e-mail à vérifier :", placeholder="ex: nom@domaine.com"
+with tab_email:
+    st.subheader("Analyse d'exposition de compte e-mail")
+
+    email_target = st.text_input(
+        "Entrez l'adresse e-mail à vérifier :", placeholder="utilisateur@domaine.com"
     )
+    btn_analyze = st.button("Lancer la recherche de fuites")
 
-    if st.button("Lancer l'analyse de fuites"):
-        if email_input and "@" in email_input and "." in email_input:
-            with st.spinner("Analyse des bases de violations de données..."):
-                is_pwned, plateformes = verifier_fuite_email(email_input)
-
-            if is_pwned is True and plateformes:
-                st.error(
-                    f"🚨 L'adresse **{email_input}** apparaît dans plusieurs fuites de données publiques !"
+    if btn_analyze and email_target:
+        if re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email_target):
+            with st.spinner("Recherche dans les bases de données d'incidents..."):
+                is_pwned, breaches = EmailBreachEvaluator.check_breaches(
+                    email_target
                 )
 
-                st.markdown("#### Plateformes concernées :")
-                for site in plateformes:
-                    st.markdown(
-                        f"""
-                    <div class="breach-pill">
-                        <span class="breach-name">🌐 {site}</span>
-                        <span style="color: #F87171; font-size: 0.85rem; font-weight: 600;">Données compromises</span>
-                    </div>
-                    """,
-                        unsafe_allow_dict=True,
+                increment_metric("tests_email")
+
+                if is_pwned:
+                    increment_metric("emails_compromis")
+                    log_event("EMAIL_TEST", "Compromised")
+                    st.error(
+                        f"🚨 L'adresse **{email_target}** a été identifiée dans des violations de données !"
                     )
 
-                st.info(
-                    "🔒 **Actions recommandées :** Changez immédiatement les mots de passe associés à ces services et activez la vérification en deux étapes (2FA)."
-                )
+                    st.markdown("#### Services/Plateformes impactés :")
+                    for breach in breaches:
+                        st.warning(f"• Service compromis : **{breach}**")
 
-            elif is_pwned is False:
-                st.success(
-                    f"🎉 Bonne nouvelle ! Aucune fuite connue n'a été associée à l'adresse **{email_input}**."
-                )
-            else:
-                st.warning(
-                    "Impossible de contacter le service de vérification. Veuillez réessayer plus tard."
-                )
+                    st.markdown("---")
+                    st.markdown(
+                        "### 🛡️ Plan d'action recommandé en cas de fuite"
+                    )
+
+                    st.markdown(
+                        """
+                    <div class="recom-box">
+                        <h4>1. Changez les mots de passe associés</h4>
+                        <p>Modifiez immédiatement le mot de passe du service compromis ainsi que celui de votre boîte e-mail si vous utilisiez le même identifiant.</p>
+                        
+                        <h4>2. Activez l'Authentification à Double Facteur (2FA/MFA)</h4>
+                        <p>Configurez la validation en deux étapes sur votre adresse e-mail et vos comptes majeurs (Banque, Réseaux sociaux, etc.).</p>
+
+                        <h4>3. Restez vigilant face aux tentatives de Phishing</h4>
+                        <p>Vos données (nom, e-mail, numéros) circulant sur des forums cybercriminels, méfiez-vous des e-mails ou SMS suspects demandant des actions urgentes.</p>
+                    </div>
+                    """,
+                        unsafe_allow_html=True,
+                    )
+
+                elif is_pwned is False:
+                    log_event("EMAIL_TEST", "Clean")
+                    st.success(
+                        f"🎉 Aucune compromission connue associée à l'adresse **{email_target}**."
+                    )
+
+                    st.markdown("---")
+                    st.markdown(
+                        "### 💡 Conseils de prévention pour protéger votre boîte mail"
+                    )
+                    st.info(
+                        """
+                    - **Utilisez des alias e-mail** : Pour vos inscriptions secondaires, privilégiez des masques e-mail (ex: DuckDuckGo Email Protection, SimpleLogin) afin de garder votre vraie adresse confidentielle.
+                    - **Vérifiez régulièrement vos accès** : Consultez régulièrement la liste des appareils connectés à votre compte de messagerie.
+                    """
+                    )
+                else:
+                    st.info(
+                        "L'analyse n'a pas pu aboutir. Réessayez ultérieurement."
+                    )
         else:
-            st.warning(
-                "Veuillez saisir une adresse e-mail valide avant de lancer la recherche."
+            st.error("Veuillez saisir un format d'adresse e-mail valide.")
+
+# ==========================================
+# ONGLET 3 : TABLEAU DE BORD STATISTIQUE
+# ==========================================
+with tab_stats:
+    st.subheader("Télémétrie globale en temps réel")
+
+    metrics_data = get_all_metrics()
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{metrics_data.get('visites_totales', 0)}</div>
+                <div class="metric-label">Visites Totales</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with c2:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{metrics_data.get('tests_mdp', 0)}</div>
+                <div class="metric-label">Mots de passe analysés</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with c3:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value">{metrics_data.get('tests_email', 0)}</div>
+                <div class="metric-label">E-mails contrôlés</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    with c4:
+        total_comp = metrics_data.get("mdp_compromis", 0) + metrics_data.get(
+            "emails_compromis", 0
+        )
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: #F87171;">{total_comp}</div>
+                <div class="metric-label">Alertes de sécurité</div>
+            </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown("#### Distribution de la robustesse des mots de passe")
+        forts = metrics_data.get("mdp_forts", 0)
+        moyens = metrics_data.get("mdp_moyens", 0)
+        faibles = metrics_data.get("mdp_faibles", 0)
+
+        total_pwd = forts + moyens + faibles
+        if total_pwd > 0:
+            st.write(
+                f"🟢 **Forts :** {forts} ({(forts/total_pwd)*100:.1f}%)"
             )
+            st.write(
+                f"🟠 **Moyens :** {moyens} ({(moyens/total_pwd)*100:.1f}%)"
+            )
+            st.write(
+                f"🔴 **Faibles :** {faibles} ({(faibles/total_pwd)*100:.1f}%)"
+            )
+        else:
+            st.info("Aucune donnée enregistrée pour le moment.")
+
+    with col_chart2:
+        st.markdown("#### Journal d'événements récents")
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT timestamp, event_type, detail FROM telemetry ORDER BY id DESC LIMIT 5"
+                )
+                logs = cursor.fetchall()
+                for log_time, event_type, detail in logs:
+                    st.text(f"[{log_time}] {event_type} - {detail}")
+        except sqlite3.Error:
+            st.write("Erreur de chargement des journaux.")
