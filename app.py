@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import feedparser
 import requests
 import streamlit as st
 
@@ -109,7 +110,45 @@ def log_event(event_type: str, detail: str = "") -> None:
 init_db()
 
 # ==========================================
-# 3. SERVICES D'AUDIT DE SÉCURITÉ
+# 3. FLUX D'ACTUALITÉS EN TEMPS RÉEL (RSS)
+# ==========================================
+
+
+@st.cache_data(ttl=900)
+def fetch_cyber_news() -> List[Dict[str, str]]:
+    """Récupère les actualités de cybersécurité en temps réel depuis des flux RSS."""
+    sources = {
+        "The Hacker News": "https://feeds.feedburner.com/TheHackersNews",
+        "BleepingComputer": "https://www.bleepingcomputer.com/feed/",
+        "ANSSI / Cert-FR": "https://www.cert.ssi.gouv.fr/feed/",
+    }
+
+    news_items = []
+
+    for source_name, url in sources.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:3]:
+                news_items.append({
+                    "source": source_name,
+                    "title": entry.title,
+                    "link": entry.link,
+                    "published": getattr(
+                        entry,
+                        "published",
+                        getattr(entry, "updated", "Récent"),
+                    ),
+                })
+        except Exception as e:
+            logger.error(
+                f"Erreur lors de la lecture du flux {source_name} : {str(e)}"
+            )
+
+    return news_items
+
+
+# ==========================================
+# 4. SERVICES D'AUDIT DE SÉCURITÉ
 # ==========================================
 
 
@@ -213,7 +252,7 @@ class EmailBreachEvaluator:
 
 
 # ==========================================
-# 4. INTERFACE UTILISATEUR (STREAMLIT)
+# 5. INTERFACE UTILISATEUR (STREAMLIT)
 # ==========================================
 
 st.set_page_config(
@@ -329,14 +368,14 @@ st.markdown(
 
         .news-title {
             font-weight: 700;
-            color: #F87171;
-            font-size: 0.9rem;
+            color: #38BDF8;
+            font-size: 0.85rem;
+            margin-bottom: 4px;
         }
 
         .news-details {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             color: #9CA3AF;
-            margin-top: 4px;
         }
     </style>
 """,
@@ -382,44 +421,29 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    st.header("📢 Actualités : Derniers Piratages")
+    st.header("📢 Flux d'Actualités en Temps Réel")
 
-    st.markdown(
-        """
-        <div class="news-card">
-            <div class="news-title">🔴 France Travail (Ex-Pôle Emploi)</div>
-            <div class="news-details">
-                <b>Données dérobées :</b> Noms, numéros de Sécurité Sociale, identifiants et e-mails de 43 millions d'usagers.<br>
-                <i>Cause :</i> Usurpation d'identifiants de conseillers.
-            </div>
-        </div>
-        
-        <div class="news-card">
-            <div class="news-title">🔴 Free / Iliad</div>
-            <div class="news-details">
-                <b>Données dérobées :</b> Données personnelles et IBAN de plus de 19 millions d'abonnés.<br>
-                <i>Cause :</i> Accès non autorisé sur un outil de gestion interne.
-            </div>
-        </div>
+    if st.button("🔄 Rafraîchir le flux", key="refresh_news"):
+        st.cache_data.clear()
 
-        <div class="news-card">
-            <div class="news-title">🔴 Ticketmaster</div>
-            <div class="news-details">
-                <b>Données dérobées :</b> Noms, e-mails, téléphones et 4 derniers chiffres de cartes bancaires pour 560 millions de clients.<br>
-                <i>Cause :</i> Attaque ciblant un environnement d'hébergement Snowflake.
-            </div>
-        </div>
+    articles = fetch_cyber_news()
 
-        <div class="news-card">
-            <div class="news-title">🔴 Viamedis & Almerys</div>
-            <div class="news-details">
-                <b>Données dérobées :</b> Informations de tiers payant de 33 millions de Français.<br>
-                <i>Cause :</i> Phishing ciblant des professionnels de santé.
-            </div>
-        </div>
-    """,
-        unsafe_allow_html=True,
-    )
+    if articles:
+        for article in articles:
+            st.markdown(
+                f"""
+                <div class="news-card">
+                    <div class="news-title">🌐 [{article['source']}]</div>
+                    <div class="news-details">
+                        <a href="{article['link']}" target="_blank" style="color: #F3F4F6; text-decoration: none; font-weight: 600;">{article['title']}</a><br>
+                        <span style="font-size: 0.75rem; color: #6B7280;">📅 {article['published']}</span>
+                    </div>
+                </div>
+            """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.warning("Aucune actualité disponible pour le moment.")
 
     st.markdown("---")
     st.caption("CyberShield v2.6 Pro - 2026")
