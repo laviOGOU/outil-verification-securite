@@ -259,159 +259,44 @@ st.set_page_config(
     page_title="CyberShield Professional Edition",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# Custom CSS
+# Custom CSS Amélioré - Look Modern & Professionnel
 st.markdown(
     """
     <style>
-        .stApp {
-            background-color: #0A0E17;
-            color: #C9D1D9;
+        .stApp { background-color: #0d1117; color: #c9d1d9; }
+        .css-1544g2n { padding-top: 1rem; }
+        
+        /* Onglets style professionnel */
+        .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+        .stTabs [data-baseweb="tab"] { 
+            background-color: #161b22; 
+            border-radius: 8px 8px 0 0; 
+            padding: 10px 20px;
         }
         
-        .title-header {
-            font-family: 'Inter', sans-serif;
-            font-size: 2.8rem;
-            font-weight: 800;
-            background: linear-gradient(90deg, #38BDF8 0%, #818CF8 50%, #C084FC 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-align: center;
-            margin-bottom: 0.2rem;
-            letter-spacing: -0.02em;
-        }
-        
-        .subtitle-header {
-            text-align: center;
-            color: #6B7280;
-            font-size: 1.1rem;
-            font-weight: 400;
-            margin-bottom: 1.5rem;
-        }
-
-        .welcome-card {
-            background: linear-gradient(135deg, #161B22 0%, #1F2937 100%);
-            border: 1px solid #30363D;
-            border-left: 5px solid #818CF8;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 2rem;
-            text-align: center;
-        }
-
-        .welcome-title {
-            font-size: 1.3rem;
-            font-weight: 700;
-            color: #F3F4F6;
-            margin-bottom: 8px;
-        }
-
-        .welcome-text {
-            color: #9CA3AF;
-            font-size: 0.95rem;
-            margin-bottom: 0;
-        }
-        
-        /* Expansion des onglets sur toute la largeur */
-        div[data-baseweb="tab-list"] {
-            width: 100% !important;
-            display: flex !important;
-            justify-content: space-between !important;
-        }
-
-        div[data-baseweb="tab"] {
-            flex: 1 !important;
-            text-align: center !important;
-            justify-content: center !important;
-        }
-        
-        .recom-box {
-            background-color: #161B22;
-            border: 1px solid #30363D;
-            border-left: 4px solid #38BDF8;
-            border-radius: 8px;
-            padding: 16px;
-            margin-top: 15px;
-        }
-        
-        .metric-card {
-            background: #161B22;
-            border: 1px solid #30363D;
-            border-radius: 10px;
-            padding: 16px;
-            text-align: center;
-        }
-        
-        .metric-value {
-            font-size: 2rem;
-            font-weight: 700;
-            color: #58A6FF;
-        }
-        
-        .metric-label {
-            font-size: 0.85rem;
-            color: #8B949E;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-        }
-
+        /* Cartes d'actualités type The Hacker News */
         .news-card {
-            background: #161B22;
-            border: 1px solid #30363D;
-            border-radius: 8px;
-            padding: 12px;
-            margin-bottom: 12px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 15px;
+            transition: transform 0.2s;
+            margin-bottom: 15px;
         }
-
-        .news-title {
-            font-weight: 700;
-            color: #38BDF8;
-            font-size: 0.85rem;
-            margin-bottom: 4px;
-        }
-
-        .news-details {
-            font-size: 0.78rem;
-            color: #9CA3AF;
-        }
+        .news-card:hover { transform: translateY(-5px); border-color: #58a6ff; }
+        .news-title { font-size: 1.1rem; font-weight: 700; color: #f0f6fc; margin-bottom: 10px; }
+        .news-meta { font-size: 0.8rem; color: #8b949e; }
+        
+        /* Titre Header */
+        .main-title { font-size: 3rem; font-weight: 800; color: #ffffff; text-align: center; margin-bottom: 2rem; }
     </style>
-""",
+    """,
     unsafe_allow_html=True,
 )
 
-if "session_active" not in st.session_state:
-    st.session_state["session_active"] = True
-    increment_metric("visites_totales")
-    user_agent = st.context.headers.get("User-Agent", "Unknown")
-    log_event("VISIT", f"User-Agent: {user_agent}")
-
-st.markdown(
-    '<div class="title-header">🛡️ CYBERSHIELD SECURITY AUDITOR</div>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<div class="subtitle-header">Plateforme d\'évaluation des vulnérabilités et télémétrie anonymisée</div>',
-    unsafe_allow_html=True,
-)
-
-# Message d'accueil incitatif
-st.markdown(
-    """
-    <div class="welcome-card">
-        <div class="welcome-title">👋 Bienvenue sur votre centre de contrôle de sécurité</div>
-        <p class="welcome-text">
-            Sélectionnez un onglet ci-dessous pour démarrer : 
-            <b>🔑 Valider la robustesse d'un mot de passe</b>, 
-            <b>📧 Vérifier si votre e-mail a été compromis</b> ou 
-            <b>📊 Consulter les statistiques d'attaques en temps réel</b>.
-        </p>
-    </div>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown('<div class="main-title">🛡️ CyberShield Professional</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚙️ Configuration & À propos")
@@ -421,40 +306,40 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    st.header("📢 Flux d'Actualités en Temps Réel")
-
-    if st.button("🔄 Rafraîchir le flux", key="refresh_news"):
-        st.cache_data.clear()
-
-    articles = fetch_cyber_news()
-
-    if articles:
-        for article in articles:
-            st.markdown(
-                f"""
-                <div class="news-card">
-                    <div class="news-title">🌐 [{article['source']}]</div>
-                    <div class="news-details">
-                        <a href="{article['link']}" target="_blank" style="color: #F3F4F6; text-decoration: none; font-weight: 600;">{article['title']}</a><br>
-                        <span style="font-size: 0.75rem; color: #6B7280;">📅 {article['published']}</span>
-                    </div>
-                </div>
-            """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.warning("Aucune actualité disponible pour le moment.")
-
     st.markdown("---")
     st.caption("CyberShield v2.6 Pro - 2026")
 
-tab_mdp, tab_email, tab_stats = st.tabs(
+tab_mdp, tab_email, tab_news, tab_stats = st.tabs(
     [
         "🔑 Audit Mot de Passe",
         "📧 Analyse de Fuite E-mail",
+        "📰 Actualités Cyber",
         "📊 Télémétrie & Métriques",
     ]
 )
+
+# ... (Ajout du code pour l'onglet tab_news) ...
+with tab_news:
+    st.subheader("🌐 Dernières alertes cybersécurité")
+    articles = fetch_cyber_news()
+    if articles:
+        cols = st.columns(3)
+        for i, article in enumerate(articles):
+            with cols[i % 3]:
+                st.markdown(
+                    f"""
+                    <div class="news-card">
+                        <div class="news-title">{article['source']}</div>
+                        <div style="margin: 10px 0;">
+                            <a href="{article['link']}" target="_blank" style="text-decoration: none; color: #38BDF8;">{article['title']}</a>
+                        </div>
+                        <div class="news-details">📅 {article['published']}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.warning("Aucune actualité disponible.")
 
 # ==========================================
 # ONGLET 1 : MOT DE PASSE
